@@ -1,0 +1,11 @@
+# 10-molecule smoke test: 5 known CA-II sulfonamide inhibitors + 5 non-CA drugs (NOT the Day-2 decoy set)
+acetazolamide
+methazolamide
+dorzolamide
+brinzolamide
+ethoxzolamide
+aspirin
+caffeine
+ibuprofen
+metformin
+paracetamol

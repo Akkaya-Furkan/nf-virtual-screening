@@ -1,0 +1,17 @@
+name: nfvs
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - smina
+  # 3.2.1 from conda-forge aborts with "double free" on exit (seen 2026-10-16), which makes
+  # ligprep-cli report every ligand as failed; 3.1.1 works.
+  - openbabel=3.1.1
+  - rdkit
+  - numpy
+  - requests
+  - pip
+  - pip:
+      # private repository: needs git credentials (e.g. `gh auth setup-git`)
+      - git+https://github.com/Akkaya-Furkan/ligprep-cli.git@7930ed9f4e3612de6178715f7a9756d93ebac6a9
