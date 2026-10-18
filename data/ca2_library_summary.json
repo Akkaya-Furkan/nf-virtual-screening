@@ -1,0 +1,24 @@
+{
+  "chembl_ca2_activity_rows": 12235,
+  "ca_targets": [
+    "CHEMBL205",
+    "CHEMBL2326",
+    "CHEMBL2420",
+    "CHEMBL261",
+    "CHEMBL2885",
+    "CHEMBL3025",
+    "CHEMBL3242",
+    "CHEMBL3510",
+    "CHEMBL3594",
+    "CHEMBL3729",
+    "CHEMBL3912",
+    "CHEMBL3969",
+    "CHEMBL4789"
+  ],
+  "approved_small_molecules": 3475,
+  "decoy_pool": 1932,
+  "actives": 142,
+  "decoys": 426,
+  "active_no_cid": 8,
+  "decoy_unresolved": 13
+}

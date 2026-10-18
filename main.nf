@@ -61,11 +61,12 @@ process DOCK {
 
     script:
     ligand = pdbqt.baseName.replaceFirst(/_CID\d+$/, '')
+    scoring_flag = params.custom_scoring ? "--custom_scoring ${params.custom_scoring}" : "--scoring ${params.scoring}"
     """
     read cx cy cz sx sy sz < <(python3 -c "import json;b=json.load(open('${box}'));print(*b['center'],*b['size'])")
     smina -r ${receptor} -l ${pdbqt} \\
         --center_x \$cx --center_y \$cy --center_z \$cz --size_x \$sx --size_y \$sy --size_z \$sz \\
-        --scoring ${params.scoring} --exhaustiveness ${params.exhaustiveness} \\
+        ${scoring_flag} --exhaustiveness ${params.exhaustiveness} \\
         --num_modes ${params.num_modes} --seed ${params.seed} --cpu ${task.cpus} \\
         -o ${ligand}.sdf --log ${ligand}.log > /dev/null
     echo "ligand,affinity" > ${ligand}.score.csv
@@ -83,8 +84,8 @@ process RANK {
     path manifest
 
     output:
-    path 'ranked.csv'
-    path 'metrics.json'
+    path 'ranked.csv',   emit: ranked
+    path 'metrics.json', emit: metrics
 
     script:
     """
@@ -103,11 +104,12 @@ process REDOCK {
     path "redock_seed${seed}.json"
 
     script:
+    scoring_flag = params.custom_scoring ? "--custom_scoring ${params.custom_scoring}" : "--scoring ${params.scoring}"
     """
     read cx cy cz sx sy sz < <(python3 -c "import json;b=json.load(open('${box}'));print(*b['center'],*b['size'])")
     smina -r ${receptor} -l ${pdbqt} \\
         --center_x \$cx --center_y \$cy --center_z \$cz --size_x \$sx --size_y \$sy --size_z \$sz \\
-        --scoring ${params.scoring} --exhaustiveness ${params.exhaustiveness} \\
+        ${scoring_flag} --exhaustiveness ${params.exhaustiveness} \\
         --num_modes ${params.num_modes} --seed ${seed} --cpu ${task.cpus} \\
         -o poses.sdf > /dev/null
     rmsd_check.py --ref ${ref_ligand} --smiles '${params.redock_smiles}' --poses poses.sdf \\
@@ -130,6 +132,48 @@ process REDOCK_SUMMARY {
     """
 }
 
+process FILTER {
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+    path ranked
+    path manifest
+    val herg_model
+
+    output:
+    path 'annotated.csv',                 emit: annotated
+    path 'top_candidates.csv',            emit: top
+    path 'top_unlabelled_or_decoy.csv',   emit: top_nonactive
+
+    script:
+    def herg = herg_model ? "--herg-model ${herg_model}" : ''
+    """
+    filters.py --ranked ${ranked} --manifest ${manifest} ${herg} --out .
+    """
+}
+
+process REPORT {
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+    path ranked
+    path metrics
+    path redock
+    path top
+    path top_nonactive
+
+    output:
+    path 'report.html'
+    path 'roc_curve.png'
+    path 'score_distribution.png'
+
+    script:
+    """
+    report.py --ranked ${ranked} --metrics ${metrics} --redock ${redock} --top ${top} \\
+        --top-nonactive ${top_nonactive} --note '${params.report_note}' --out .
+    """
+}
+
 workflow {
     receptor = PREP_RECEPTOR(file(params.pdb))
     lig      = PREP_LIGANDS(file(params.ligands))
@@ -139,7 +183,7 @@ workflow {
         .combine(receptor.box)
     docked = DOCK(dock_in)
 
-    RANK(docked.score.collect(), file(params.labels), lig.manifest)
+    ranked = RANK(docked.score.collect(), file(params.labels), lig.manifest)
 
     // re-docking of the co-crystal ligand through the same prepared files
     azm = lig.pdbqt.flatten().filter { it.name.startsWith("${params.redock_label}_CID") }
@@ -147,5 +191,8 @@ workflow {
     redock_in = seeds.combine(azm)
         .combine(receptor.receptor).combine(receptor.clean_pdb)
         .combine(receptor.ref_ligand).combine(receptor.box)
-    REDOCK_SUMMARY(REDOCK(redock_in).collect())
+    redock = REDOCK_SUMMARY(REDOCK(redock_in).collect())
+
+    filt = FILTER(ranked.ranked, lig.manifest, params.herg_model ?: '')
+    REPORT(ranked.ranked, ranked.metrics, redock, filt.top, filt.top_nonactive)
 }

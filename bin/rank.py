@@ -29,6 +29,28 @@ def enrichment_factor(ranked_labels, fraction):
     return (sum(ranked_labels[:k]) / k) / (n_act / n)
 
 
+def bootstrap_ci(scores, labels, fraction, n_boot=1000, seed=0):
+    """95 % percentile bootstrap (resampling molecules) for ROC-AUC (fraction=None) or EF at `fraction`."""
+    import random
+    rng = random.Random(seed)
+    idx = range(len(scores))
+    vals = []
+    for _ in range(n_boot):
+        s = [rng.choice(idx) for _ in idx]
+        sc, y = [scores[i] for i in s], [labels[i] for i in s]
+        if fraction is None:
+            v = auc_roc(sc, y)
+        else:
+            order = sorted(range(len(sc)), key=lambda i: -sc[i])
+            v = enrichment_factor([y[i] for i in order], fraction)
+        if v is not None:
+            vals.append(v)
+    vals.sort()
+    if not vals:
+        return None
+    return [round(vals[int(0.025 * len(vals))], 3), round(vals[int(0.975 * len(vals)) - 1], 3)]
+
+
 def rank(score_rows, labels):
     """score_rows: dicts with ligand, affinity (kcal/mol, more negative = better). Returns ranked dicts."""
     rows = []
@@ -63,6 +85,12 @@ def main(argv=None):
         "n_decoys": len(y) - sum(y),
         "roc_auc": auc_roc([-r["affinity"] for r in scored], y),
         "ef": {a_: enrichment_factor(y, float(a_)) for a_ in a.ef.split(",")},
+        "roc_auc_ci95": bootstrap_ci([-r["affinity"] for r in scored], y, None) if len(scored) > 20 else None,
+        "ef_ci95": ({a_: bootstrap_ci([-r["affinity"] for r in scored], y, float(a_))
+                     for a_ in a.ef.split(",")} if len(scored) > 20 else None),
+        "ef_max_possible": {a_: round(min(1.0, sum(y) / max(1, math.ceil(len(y) * float(a_))))
+                                      / (sum(y) / len(y)), 3) if sum(y) else None
+                            for a_ in a.ef.split(",")},
         "unlabeled_ligands": unlabeled,
         "labelled_but_not_docked": sorted(set(labels) - {r["ligand"] for r in ranked}),
     }
