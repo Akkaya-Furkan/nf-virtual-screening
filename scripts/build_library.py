@@ -32,7 +32,7 @@ from rdkit.ML.Cluster import Butina
 CHEMBL = "https://www.ebi.ac.uk/chembl/api/data"
 PUBCHEM = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
 SESSION = requests.Session()
-SESSION.headers["User-Agent"] = "nf-virtual-screening/0.2 (research; akkaya.furknn@gmail.com)"
+SESSION.headers["User-Agent"] = "nf-virtual-screening/0.2 (research)"
 RAW = Path("data/raw")
 PRIMARY_SULFONAMIDE = Chem.MolFromSmarts("[SX4](=O)(=O)[NX3;H2]")
 
