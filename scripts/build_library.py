@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Build the CA-II screening library from live ChEMBL and PubChem responses.
+"""Build a target screening library (default: CA-II) from live ChEMBL and PubChem responses.
 
-Actives   : ChEMBL human CA-II (CHEMBL205) Ki/IC50 records, '=' relation, nM, pChEMBL >= 6; one row per
+Actives   : ChEMBL selected target (default human CA-II, CHEMBL205) Ki/IC50 records, '=' relation, nM, pChEMBL >= 6; one row per
             molecule (median pChEMBL); ECFP4 Butina clusters (Tanimoto distance 0.6), the best-pChEMBL member
-            of the largest clusters first, until N actives (acetazolamide is always kept).
+            of the largest clusters first, until N actives (acetazolamide is always kept for the default CA-II target).
 Pool      : ChEMBL approved (max_phase 4) small molecules, minus any molecule with a recorded activity on
-            ANY human carbonic anhydrase and minus primary sulfonamides.
+            ANY human carbonic anhydrase and minus primary sulfonamides for the default target;
+            otherwise minus molecules with activity on the selected target.
 Decoys    : per active, the DECOYS_PER_ACTIVE nearest pool molecules in standardised
             (MW, cLogP, HBD, HBA, rotatable bonds, formal charge, heavy atoms) space, without reuse, with
             max ECFP4 Tanimoto to every active < MAX_SIM. Only molecules with a PubChem CID are kept
             (ligprep-cli needs one); an unresolvable decoy is replaced by the next nearest.
+For other targets, only that target is excluded from the decoy pool; the CA-specific
+primary-sulfonamide exclusion and forced acetazolamide seed are disabled. This does not
+establish experimental non-binding or exclude activity on related targets.
 Every API response is cached under data/raw/ so the build is repeatable offline once cached.
 """
 from __future__ import annotations
@@ -143,27 +147,35 @@ def pubchem_cid(inchikey, cache={}):
     return cache[inchikey]
 
 
-def main():
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--actives", type=int, default=150)
     ap.add_argument("--decoys-per-active", type=int, default=3)
     ap.add_argument("--max-sim", type=float, default=0.4)
     ap.add_argument("--out", default="data")
-    a = ap.parse_args()
+    ap.add_argument("--target-chembl-id", default="CHEMBL205")
+    return ap.parse_args(argv)
 
-    targets = ca_targets()
-    print("CA targets:", targets, file=sys.stderr)
-    acts = chembl_all("activity", {"target_chembl_id": "CHEMBL205", "standard_type__in": "Ki,IC50",
-                                   "pchembl_value__isnull": "false"}, "chembl_ca2_activities.json")
+
+def main(argv=None):
+    a = parse_args(argv)
+    ca2 = a.target_chembl_id == "CHEMBL205"
+    prefix = "ca2" if ca2 else a.target_chembl_id.lower()
+    target_name = "CA-II" if ca2 else a.target_chembl_id
+
+    targets = ca_targets() if ca2 else [a.target_chembl_id]
+    print("CA targets:" if ca2 else "Excluded targets:", targets, file=sys.stderr)
+    acts = chembl_all("activity", {"target_chembl_id": a.target_chembl_id, "standard_type__in": "Ki,IC50",
+                                   "pchembl_value__isnull": "false"}, f"chembl_{prefix}_activities.json")
     any_ca = set()
     for t in targets:
         any_ca |= {x["molecule_chembl_id"] for x in chembl_all(
             "activity", {"target_chembl_id": t, "pchembl_value__isnull": "false"}, f"chembl_act_{t}.json")}
     drugs = chembl_all("molecule", {"max_phase": 4, "molecule_type": "Small molecule"}, "chembl_approved.json")
-    print(f"CA-II activity rows {len(acts)}; molecules with any CA activity {len(any_ca)}; "
+    print(f"{target_name} activity rows {len(acts)}; molecules with any {'CA' if ca2 else target_name} activity {len(any_ca)}; "
           f"approved small molecules {len(drugs)}", file=sys.stderr)
 
-    actives = select_actives(acts, a.actives)
+    actives = select_actives(acts, a.actives, seed_chembl_id="CHEMBL20" if ca2 else None)
     gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
     active_fps = [gen.GetFingerprint(m) for _, m, *_ in actives]
     ids_act = {i for i, *_ in actives}
@@ -176,7 +188,7 @@ def main():
         if cid in any_ca or cid in ids_act or not st.get("canonical_smiles"):
             continue
         m = clean_mol(st["canonical_smiles"])
-        if m is None or m.HasSubstructMatch(PRIMARY_SULFONAMIDE) or not 8 <= m.GetNumHeavyAtoms() <= 60:
+        if m is None or (ca2 and m.HasSubstructMatch(PRIMARY_SULFONAMIDE)) or not 8 <= m.GetNumHeavyAtoms() <= 60:
             continue
         fp = gen.GetFingerprint(m)
         if max(DataStructs.BulkTanimotoSimilarity(fp, active_fps)) >= a.max_sim:
@@ -226,18 +238,18 @@ def main():
     rows = list(labels.values())
 
     out = Path(a.out)
-    with open(out / "ca2_labels.csv", "w", newline="") as fh:
+    with open(out / f"{prefix}_labels.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    with open(out / "ca2_library.txt", "w") as fh:
-        fh.write("# CA-II library built by scripts/build_library.py from ChEMBL + PubChem (cid: lines)\n")
+    with open(out / f"{prefix}_library.txt", "w") as fh:
+        fh.write(f"# {target_name} library built by scripts/build_library.py from ChEMBL + PubChem (cid: lines)\n")
         fh.writelines(f"cid:{r['label']}\n" for r in rows)
     n1 = sum(r["activity"] for r in rows)
-    summary = {"chembl_ca2_activity_rows": len(acts), "ca_targets": targets,
+    summary = {f"chembl_{prefix}_activity_rows": len(acts), "ca_targets" if ca2 else "excluded_targets": targets,
                "approved_small_molecules": len(drugs), "decoy_pool": len(pool), "actives": n1,
                "decoys": len(rows) - n1, **stats}
-    json.dump(summary, open(out / "ca2_library_summary.json", "w"), indent=2)
+    json.dump(summary, open(out / f"{prefix}_library_summary.json", "w"), indent=2)
     print(json.dumps(summary, indent=2))
 
 

@@ -1,13 +1,17 @@
 nextflow.enable.dsl = 2
 
 /*
- * Docking-based virtual screening against human carbonic anhydrase II.
+ * Docking-based virtual screening with a configurable receptor and reference ligand.
  *   PREP_RECEPTOR -> receptor PDBQT + reference ligand + search box
  *   PREP_LIGANDS  -> ligprep-cli: names/CIDs/SMILES -> PDBQT
  *   DOCK          -> smina, one task per ligand
  *   RANK          -> ranking, ROC-AUC, EF
  *   REDOCK        -> co-crystal ligand re-docking RMSD over several seeds
  */
+
+def shellQuote(value) {
+    return "'" + value.toString().replace("'", "'\\''") + "'"
+}
 
 process PREP_RECEPTOR {
     input:
@@ -22,13 +26,15 @@ process PREP_RECEPTOR {
     script:
     """
     prep_receptor.py ${pdb} --chain ${params.chain} --ligand ${params.ref_ligand} \\
-        --resnum ${params.ref_resnum} --padding ${params.box_padding} --out .
+        --resnum ${params.ref_resnum} --padding ${params.box_padding} --metal ${params.metal} --out .
     # polar hydrogens + AD4 atom types; the crystal structure carries no hydrogens
     obabel receptor_clean.pdb -xr -h -p 7.4 -O receptor.pdbqt
     # Open Babel leaves the zinc uncharged; set its formal +2 so the file is self-consistent
     # (Vina-type scoring ignores partial charges, so this does not change the scores)
+    if [ '${params.metal.toString().toUpperCase()}' = ZN ]; then
     sed -i 's/^\\(ATOM .* ZN .*\\)+0.000 Zn/\\1+2.000 Zn/' receptor.pdbqt
     grep -q '+2.000 Zn' receptor.pdbqt
+    fi
     """
 }
 
@@ -113,7 +119,7 @@ process REDOCK {
         --num_modes ${params.num_modes} --seed ${seed} --cpu ${task.cpus} \\
         -o poses.sdf > /dev/null
     rmsd_check.py --ref ${ref_ligand} --smiles '${params.redock_smiles}' --poses poses.sdf \\
-        --receptor ${clean_pdb} --threshold ${params.rmsd_threshold} --out redock_seed${seed}.json
+        --receptor ${clean_pdb} --metal ${params.metal} --threshold ${params.rmsd_threshold} --out redock_seed${seed}.json
     """
 }
 
@@ -168,9 +174,12 @@ process REPORT {
     path 'score_distribution.png'
 
     script:
+    def redock_arg = redock ? "--redock ${redock}" : ''
     """
-    report.py --ranked ${ranked} --metrics ${metrics} --redock ${redock} --top ${top} \\
-        --top-nonactive ${top_nonactive} --note '${params.report_note}' --out .
+    report.py --ranked ${ranked} --metrics ${metrics} ${redock_arg} --top ${top} \\
+        --top-nonactive ${top_nonactive} --note ${shellQuote(params.report_note)} \\
+        --report-target ${shellQuote(params.report_target)} --report-question ${shellQuote(params.report_question)} \\
+        --decoy-label ${shellQuote(params.decoy_label)} --redock-label ${shellQuote(params.redock_label ?: '')} --out .
     """
 }
 
@@ -185,13 +194,17 @@ workflow {
 
     ranked = RANK(docked.score.collect(), file(params.labels), lig.manifest)
 
-    // re-docking of the co-crystal ligand through the same prepared files
-    azm = lig.pdbqt.flatten().filter { it.name.startsWith("${params.redock_label}_CID") }
-    seeds = Channel.of(params.redock_seeds.toString().tokenize(',')*.toInteger()).flatten()
-    redock_in = seeds.combine(azm)
-        .combine(receptor.receptor).combine(receptor.clean_pdb)
-        .combine(receptor.ref_ligand).combine(receptor.box)
-    redock = REDOCK_SUMMARY(REDOCK(redock_in).collect())
+    // An empty reference label disables both re-docking processes.
+    redock = Channel.value([])
+    if (params.redock_label?.toString()?.trim()) {
+        reference = lig.pdbqt.flatten().filter { it.name.startsWith("${params.redock_label}_CID") }
+            .ifEmpty { error "No prepared ligand matches redock_label: ${params.redock_label}" }
+        seeds = Channel.of(params.redock_seeds.toString().tokenize(',')*.toInteger()).flatten()
+        redock_in = seeds.combine(reference)
+            .combine(receptor.receptor).combine(receptor.clean_pdb)
+            .combine(receptor.ref_ligand).combine(receptor.box)
+        redock = REDOCK_SUMMARY(REDOCK(redock_in).collect())
+    }
 
     filt = FILTER(ranked.ranked, lig.manifest, params.herg_model ?: '')
     REPORT(ranked.ranked, ranked.metrics, redock, filt.top, filt.top_nonactive)

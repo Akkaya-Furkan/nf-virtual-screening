@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Clean a PDB entry into a docking receptor, a reference ligand and a search box.
 
-Keeps the chosen protein chain (first alternate location only) and the catalytic zinc;
+Keeps the chosen protein chain (first alternate location only) and the selected metal;
 drops waters, glycerol, other ligands and extra copies of the co-crystal ligand.
 The box is centred on the reference ligand with `padding` Å around its extent.
 """
@@ -31,7 +31,7 @@ def split_structure(lines, chain, ligand, resnum, metal="ZN"):
             receptor.append(line.rstrip("\n"))
         elif resname == ligand and int(line[22:26]) == resnum:
             lig.append(line.rstrip("\n"))
-        elif resname == metal or (element == metal and resname not in WATER):
+        elif metal != "NONE" and (resname == metal or (element == metal and resname not in WATER)):
             receptor.append(line.rstrip("\n"))
     return receptor, lig
 
@@ -54,15 +54,17 @@ def main(argv=None):
     ap.add_argument("--ligand", default="AZM", help="co-crystal ligand residue name")
     ap.add_argument("--resnum", type=int, default=701, help="residue number of the copy in the active site")
     ap.add_argument("--padding", type=float, default=8.0)
+    ap.add_argument("--metal", default="ZN", type=str.upper, help="required metal residue name, or none")
     ap.add_argument("--out", default=".")
     a = ap.parse_args(argv)
 
     lines = Path(a.pdb).read_text().splitlines()
-    receptor, lig = split_structure(lines, a.chain, a.ligand, a.resnum)
+    receptor, lig = split_structure(lines, a.chain, a.ligand, a.resnum, a.metal)
     if not lig:
         raise SystemExit(f"ligand {a.ligand} {a.resnum} chain {a.chain} not found")
-    if not any(l[17:20].strip() == "ZN" for l in receptor):
-        raise SystemExit("no zinc found in chain " + a.chain)
+    if a.metal != "NONE" and not any(l[17:20].strip() == a.metal for l in receptor):
+        name = "zinc" if a.metal == "ZN" else a.metal
+        raise SystemExit(f"no {name} found in chain " + a.chain)
     center, size = box_from_ligand(lig, a.padding)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

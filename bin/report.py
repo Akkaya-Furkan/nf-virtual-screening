@@ -39,13 +39,14 @@ def load(path):
     return sorted(out, key=lambda r: r["affinity"])
 
 
-def figures(rows, metrics, outdir):
+def figures(rows, metrics, outdir, report_target="Carbonic anhydrase II", decoy_label="decoys"):
+    target = "CA-II" if report_target == "Carbonic anhydrase II" else report_target
     fpr, tpr = roc_points(rows)
     fig, ax = plt.subplots(figsize=(4.6, 4.4), dpi=150)
     ax.plot(fpr, tpr, color="#1f6f8b", lw=2, label=f"docking score (AUC {metrics['roc_auc']:.2f})")
     ax.plot([0, 1], [0, 1], "--", color="#999", lw=1, label="random")
     ax.set(xlabel="false positive rate", ylabel="true positive rate",
-           title=f"CA-II: {metrics['n_actives']} actives vs {metrics['n_decoys']} decoys")
+           title=f"{target}: {metrics['n_actives']} actives vs {metrics['n_decoys']} decoys")
     ax.legend(loc="lower right", frameon=False)
     fig.tight_layout()
     fig.savefig(Path(outdir) / "roc_curve.png")
@@ -54,9 +55,9 @@ def figures(rows, metrics, outdir):
     fig, ax = plt.subplots(figsize=(5.4, 4.0), dpi=150)
     bins = [x / 2 for x in range(-30, 0)]
     ax.hist([r["affinity"] for r in rows if r["activity"] == 0], bins=bins, alpha=.65, color="#999",
-            label="property-matched decoys")
+            label=decoy_label)
     ax.hist([r["affinity"] for r in rows if r["activity"] == 1], bins=bins, alpha=.65, color="#c8553d",
-            label="known CA-II actives")
+            label=f"known {target} actives")
     ax.set(xlabel="best smina score (kcal/mol, lower = better)", ylabel="molecules",
            title="Score distributions")
     ax.legend(frameon=False)
@@ -80,7 +81,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ranked", required=True)
     ap.add_argument("--metrics", required=True)
-    ap.add_argument("--redock", required=True)
+    ap.add_argument("--redock")
+    ap.add_argument("--report-target", default="Carbonic anhydrase II")
+    ap.add_argument("--report-question", default="Does the pipeline rank known CA-II binders above property-matched decoys?")
+    ap.add_argument("--decoy-label", default="decoys")
+    ap.add_argument("--redock-label", default="acetazolamide")
     ap.add_argument("--annotated")
     ap.add_argument("--top")
     ap.add_argument("--top-nonactive")
@@ -88,29 +93,31 @@ def main(argv=None):
     ap.add_argument("--out", default=".")
     a = ap.parse_args(argv)
     metrics = json.load(open(a.metrics))
-    redock = json.load(open(a.redock))
+    redock = json.load(open(a.redock)) if a.redock else None
     rows = load(a.ranked)
-    figures(rows, metrics, a.out)
+    figures(rows, metrics, a.out, a.report_target, a.decoy_label)
     cols = ["rank", "ligand", "affinity", "activity", "lipinski_violations", "pains", "herg_prob"]
     rd = redock
     ef = ", ".join(f"EF{float(k):.0%} = {v:.2f} (95 % CI {metrics['ef_ci95'][k][0]}–{metrics['ef_ci95'][k][1]}, "
                    f"max {metrics['ef_max_possible'][k]})" for k, v in metrics["ef"].items()) \
         if metrics.get("ef_ci95") else ", ".join(f"EF{k}={v}" for k, v in metrics["ef"].items())
     ci = metrics.get("roc_auc_ci95")
-    doc = f"""<!doctype html><meta charset="utf-8"><title>CA-II virtual screening report</title>
+    target = "CA-II" if a.report_target == "Carbonic anhydrase II" else a.report_target
+    redock_text = f"""<p>{html.escape((a.redock_label[:1].upper() + a.redock_label[1:]))} re-docking (top-ranked pose, {rd['n_seeds']} seeds): RMSD &lt; {rd['threshold']} Å in
+{rd['top_pose_pass_fraction']:.0%} of seeds (min {rd['top_pose_rmsd_min']}, median {rd['top_pose_rmsd_median']},
+max {rd['top_pose_rmsd_max']} Å). The scoring function and box were tuned on this same crystal ligand, so this
+figure is optimistic.</p>""" if rd else "<p>Re-docking skipped.</p>"
+    doc = f"""<!doctype html><meta charset="utf-8"><title>{html.escape(target)} virtual screening report</title>
 <style>body{{font:15px/1.5 system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;color:#222}}
 table{{border-collapse:collapse;font-size:13px}}td,th{{border:1px solid #ccc;padding:2px 6px;text-align:left}}
 img{{max-width:48%}}code{{background:#f2f2f2;padding:0 3px}}</style>
-<h1>Carbonic anhydrase II — docking-based virtual screening</h1>
-<p><b>Question.</b> Does the pipeline rank known CA-II binders above property-matched decoys?</p>
+<h1>{html.escape(a.report_target)} — docking-based virtual screening</h1>
+<p><b>Question.</b> {html.escape(a.report_question)}</p>
 <h2>Result</h2>
 <p>{metrics['n_actives']} actives and {metrics['n_decoys']} decoys docked
 ({metrics['n_scored_with_label']} scored). ROC-AUC <b>{metrics['roc_auc']:.3f}</b>{f" (95 % CI {ci[0]}–{ci[1]})" if ci else ""}.
 {ef}.</p>
-<p>Acetazolamide re-docking (top-ranked pose, {rd['n_seeds']} seeds): RMSD &lt; {rd['threshold']} Å in
-{rd['top_pose_pass_fraction']:.0%} of seeds (min {rd['top_pose_rmsd_min']}, median {rd['top_pose_rmsd_median']},
-max {rd['top_pose_rmsd_max']} Å). The scoring function and box were tuned on this same crystal ligand, so this
-figure is optimistic.</p>
+{redock_text}
 <p>{html.escape(a.note)}</p>
 <p><img src="{img(Path(a.out)/'roc_curve.png')}"> <img src="{img(Path(a.out)/'score_distribution.png')}"></p>
 <h2>Top 20 (Lipinski ≤ 1 violation, no PAINS alert)</h2>{table(list(csv.DictReader(open(a.top)))[:20], cols) if a.top else ''}

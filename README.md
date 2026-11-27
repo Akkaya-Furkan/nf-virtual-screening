@@ -43,7 +43,7 @@ so the conda Open Babel finds its own data.
 
 ## Tests
 ```bash
-pytest -q        # 18 tests, no network: box/receptor cleaning on 3HS4, RMSD, ROC-AUC, EF, seed summary
+pytest -q        # 25 tests, no network: receptor/metal paths, RMSD, ROC-AUC, EF, reports, library arguments
 ```
 Not covered by tests: the Nextflow workflow itself (checked by running it) and smina.
 
@@ -138,3 +138,112 @@ It is a finding that **docking scores in this setup barely separate CA-II binder
   bias. Docking scores (kcal/mol) are not affinities.
 - Docker profile: not verified (no Docker on the development machines).
 - CI runs only the pytest suite (no Nextflow, smina or Open Babel); the workflow itself is checked by running it.
+
+## Other targets
+
+The CA-II defaults for receptor preparation, docking, ranking and re-docking are preserved.
+The one intentional report default change is `decoy_label = 'decoys'`: the ten-molecule smoke-test
+controls are **not** property-matched. Historical Results and Limitations above are unchanged.
+To retain the full-library figure wording, run:
+
+```bash
+nextflow run . -profile local --ligands data/ca2_library.txt --labels data/ca2_labels.csv \
+  --decoy_label 'property-matched decoys'
+```
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `pdb` | `data/3HS4.pdb` | Local receptor PDB |
+| `chain` | `A` | Protein/reference chain; first alternate location only |
+| `ref_ligand` | `AZM` | Co-crystal ligand residue name |
+| `ref_resnum` | `701` | Reference residue number on the chosen chain |
+| `box_padding` | `4.0` Å | Padding on each side of the reference ligand extent |
+| `metal` | `ZN` | Required metal residue name; `none` disables metal retention/checks |
+| `redock_label` | `acetazolamide` | Name in the ligand input list; empty/null disables re-docking |
+| `redock_smiles` | `CC(=O)NC1=NN=C(S1)S(=O)(=O)N` | Bond-order template for that reference ligand |
+| `report_target` | `Carbonic anhydrase II` | Report heading and figure target |
+| `report_question` | `Does the pipeline rank known CA-II binders above property-matched decoys?` | Report question; override for a new target or smoke test |
+| `decoy_label` | `decoys` | Score-distribution legend; use `property-matched decoys` only for matched controls |
+| `build_library.py --target-chembl-id` | `CHEMBL205` | ChEMBL target used to build a library (separate script) |
+
+`--metal none` keeps the chosen protein chain but drops metal HETATM records. For a metal name,
+that residue must exist on the selected chain. Only `ZN` receives the historical Open Babel +2 charge
+correction/check. Metals other than ZN have **not been tested**; their preparation and scoring need
+independent validation. `receptor_clean.pdb`, `receptor.pdbqt`, `ref_ligand.pdb` and `box.json` keep their names.
+
+For re-docking on another target, supply `--redock_label <name-in-the-list> --redock_smiles '<SMILES>'`.
+The prepared `<name>_CID…` ligand is selected from that same screening list; the SMILES must describe
+the co-crystal ligand, including the same heavy-atom graph. A requested label with no prepared match
+fails explicitly. With `"redock_label": ""` or `"redock_label": null` in a params JSON, both `REDOCK` and
+`REDOCK_SUMMARY` are skipped. The report still runs; `metrics.json` keeps its schema and
+**no `redock_summary.json` is written**. Use a fresh output directory to avoid stale summaries.
+Pass a params JSON via `-params-file no_redock.json` (for example
+`{"redock_label": null, "outdir": "results_no_redock"}`). Nextflow 26.10.7 parses a bare
+CLI `--redock_label ''` as boolean true rather than an empty string; use the JSON form.
+
+With re-docking enabled, summary keys remain `threshold`, `n_seeds`, `seeds`,
+`top_pose_rmsd_per_seed`, `top_pose_pass_fraction`, `best_of_modes_pass_fraction`,
+`top_pose_rmsd_min`, `top_pose_rmsd_median`, `top_pose_rmsd_max`, `crystal_zn_N_distance`.
+The last field is `null` when `metal=none` or zinc is absent; per-mode `zn_N_distance` is also `null`.
+Heavy-atom, symmetry-aware RMSD in the receptor frame is unchanged. If direct graph matching
+fails after SDF conversion, pose bond orders/formal charges are restored from the reference
+(connectivity must match, with the same heavy-atom count), a diagnostic is printed, and the same
+RMSD calculation is retried without moving coordinates. This was required for the EGFR pilot. Consumers must accept this
+nullable distance and, when re-docking is disabled, the missing summary file.
+
+### EGFR 4WKQ plumbing pilot
+
+This eight-molecule pilot checks execution on a non-CA target; it has **no meaningful discriminative
+power**. Prepare `egfr_ligands.txt` with erlotinib, gefitinib, osimertinib, aspirin, caffeine, ibuprofen,
+metformin and paracetamol (one name per line), and `egfr_labels.csv` with `label,activity`:
+the first three names labelled 1, the remaining five labelled 0. Using the supplied local 4WKQ PDB
+and RDKit SMILES from the supplied gefitinib SDF (protonated morpholine):
+
+```bash
+nextflow run . -profile local \
+  --pdb 4WKQ.pdb --chain A --ref_ligand IRE --ref_resnum 1101 --metal none \
+  --ligands egfr_ligands.txt --labels egfr_labels.csv \
+  --redock_label gefitinib \
+  --redock_smiles 'COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCC[NH+]1CCOCC1' \
+  --report_target 'EGFR kinase domain (4WKQ)' \
+  --report_question 'Pipeline plumbing test on a non-CA target' --outdir results_egfr
+```
+
+This uses the deposited single structure and a rigid receptor. There is no covalent docking,
+receptor flexibility, ensemble sampling or automatic handling of modified amino-acid residues.
+In particular, 4WKQ has deposited CSX; this pilot does not convert it to CYS. A successful run is
+not validation of receptor chemistry, binding modes or screening performance. Whole-ligand gefitinib
+RMSD may exceed 2 Å because its flexible tail differs; no core-only pass criterion is substituted.
+
+The desktop pilot completed all 24 tasks (16 executed, 8 cached on recovery), docked all eight
+ligands with no preparation failures, and produced the requested EGFR report heading. IRE A1101
+has 31 heavy atoms; the verified box centre is `[2.436, 193.199, 21.770]` Å and size
+`[17.400, 17.400, 20.739]` Å. Top-pose RMSDs for seeds 1–10 were
+`2.46, 2.45, 2.40, 2.43, 2.48, 2.46, 2.41, 2.46, 2.42, 2.50` Å; median 2.46 Å,
+0/10 top poses and 8/10 best-of-modes below 2 Å. This is lower than the kit EGFR project's
+2.61–3.37 Å range, under a different protocol (that project uses a 22 Å cube and CSX→CYS
+conversion). The cause of the difference was not isolated. Pilot ROC-AUC was 1.0, EF1%/EF10%
+2.667, with no confidence intervals; n=8 and a size-only AUC of 1.0 preclude a discrimination claim.
+The kit QC and report scripts both returned 0 with `crystal_zn_N_distance: null` (6 OK,
+5 warnings, 1 skipped). The warnings include missing confidence intervals, tiny EF sample,
+failed top-pose re-docking and size confounding; no kit code was changed.
+
+### Library builder scope
+
+`python scripts/build_library.py --target-chembl-id CHEMBL203` selects another target and writes
+`chembl203_labels.csv`, `chembl203_library.txt`, `chembl203_library_summary.json` under `--out`.
+For a non-default target, decoys exclude recorded activity on that target only; the CA-family
+exclusion, primary-sulfonamide exclusion and forced acetazolamide seed apply only to CHEMBL205.
+Related-target activity and experimental non-binding require separate review.
+With default arguments, the CA-family queries, cache names, selection/filtering, output names,
+header and summary keys remain identical by code inspection. `--help`, argument parsing and
+`py_compile` were checked; the network library build was **not verified** (ağ koşusu doğrulanmadı).
+The test suite now has 25 tests, including tiny synthetic metal-free and report fixtures; no new
+ChEMBL records are included.
+
+Desktop regression checks also reproduced the CA-II smoke-test ligand/affinity columns byte for
+byte (`cmp`), all numeric metrics and the complete metrics/re-docking JSON (AUC 0.66, top-pose
+pass fraction 0.9, best-of-modes 1.0). Both empty-string and null labels in params JSON completed
+15 tasks with no re-docking processes, identical metrics, an HTML report and no summary file.
+The current kit accepts a null Zn–N field; it still requires a full re-docking summary, so its
+missing-summary behavior needs a separate skip policy before using it with re-docking disabled.

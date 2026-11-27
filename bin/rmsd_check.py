@@ -37,7 +37,7 @@ def sulfonamide_n_index(mol):
 
 
 def zn_distance(mol, conf_id, zn_xyz, n_idx):
-    if n_idx is None:
+    if n_idx is None or zn_xyz is None:
         return None
     p = mol.GetConformer(conf_id).GetAtomPosition(n_idx)
     return round(((p.x - zn_xyz[0]) ** 2 + (p.y - zn_xyz[1]) ** 2 + (p.z - zn_xyz[2]) ** 2) ** 0.5, 2)
@@ -49,7 +49,16 @@ def evaluate(ref, poses, zn_xyz):
     ref_n = sulfonamide_n_index(ref)
     for i, pose in enumerate(poses, 1):
         pose = Chem.RemoveHs(pose)
-        rmsd = rdMolAlign.CalcRMS(pose, ref)
+        try:
+            rmsd = rdMolAlign.CalcRMS(pose, ref)
+        except RuntimeError:
+            # PDBQT/SDF conversion can lose bond orders and formal charges. Restore
+            # only the reference graph; coordinates and the RMSD calculation stay unchanged.
+            if pose.GetNumHeavyAtoms() != ref.GetNumHeavyAtoms():
+                raise ValueError("pose and reference have different heavy-atom counts") from None
+            pose = AssignBondOrdersFromTemplate(ref, pose)
+            print(f"mode {i}: restored pose bond orders/charges from reference for RMSD", file=sys.stderr)
+            rmsd = rdMolAlign.CalcRMS(pose, ref)
         rows.append({
             "mode": i,
             "affinity": float(pose.GetProp("minimizedAffinity")) if pose.HasProp("minimizedAffinity") else None,
@@ -63,7 +72,7 @@ def zn_coords(receptor_pdb):
     for line in open(receptor_pdb):
         if line.startswith(("ATOM", "HETATM")) and line[17:20].strip() == "ZN":
             return float(line[30:38]), float(line[38:46]), float(line[46:54])
-    raise ValueError("no zinc in receptor")
+    return None
 
 
 def main(argv=None):
@@ -72,6 +81,7 @@ def main(argv=None):
     ap.add_argument("--smiles", required=True, help="SMILES of the ligand (bond-order template)")
     ap.add_argument("--poses", required=True, help="smina SDF output")
     ap.add_argument("--receptor", required=True, help="cleaned receptor PDB (for the zinc position)")
+    ap.add_argument("--metal", default="ZN", type=str.upper)
     ap.add_argument("--threshold", type=float, default=2.0)
     ap.add_argument("--out", default="redock.json")
     a = ap.parse_args(argv)
@@ -80,7 +90,7 @@ def main(argv=None):
     poses = [m for m in Chem.SDMolSupplier(a.poses, removeHs=False) if m is not None]
     if not poses:
         sys.exit("no poses in " + a.poses)
-    rows, ref_zn = evaluate(ref, poses, zn_coords(a.receptor))
+    rows, ref_zn = evaluate(ref, poses, None if a.metal == "NONE" else zn_coords(a.receptor))
     top = rows[0]["rmsd"]
     best = min(r["rmsd"] for r in rows)
     result = {
